@@ -1,0 +1,10 @@
+# Publish ONLY the website (docs/). Keep everything else off GitHub.
+/OneDrive_*
+/Library*
+/_db_build/
+/site/
+*.command
+*.bat
+.DS_Store
+.claude/
+!docs/
