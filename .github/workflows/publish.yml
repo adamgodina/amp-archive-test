@@ -1,12 +1,13 @@
 name: Publish AMP Archive
 
 # Manual only — click "Run workflow" on the Actions tab whenever new files
-# have been added to the OneDrive archive (once or twice a quarter).
+# have been added to the archive (once or twice a quarter).
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write      # to commit the rebuilt site
+  id-token: write      # to get a GitHub OIDC token (no client secret needed)
 
 jobs:
   build:
@@ -20,12 +21,12 @@ jobs:
 
       - run: pip install msal requests
 
-      - name: Build the site from OneDrive (via Microsoft Graph)
+      - name: Build the site from the SharePoint archive (via Microsoft Graph)
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          SHARE_URL: ${{ secrets.SHARE_URL }}
+          SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
+          ARCHIVE_FOLDER: ${{ secrets.ARCHIVE_FOLDER }}
           SITE_TITLE: "AMP Stock Pitch Archive"
         run: python graph_build_site.py
 

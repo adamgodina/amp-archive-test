@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Cloud builder: reads the shared OneDrive archive via the Microsoft Graph API
-and writes docs/index.html. Runs in GitHub Actions -- nothing local, nothing
-downloaded (it only reads file names/paths + each file's link, never contents).
+Cloud builder (least-privilege). Reads ONE SharePoint site's document library
+via Microsoft Graph and writes docs/index.html. Runs in GitHub Actions.
 
-Needs these environment variables (set as GitHub Secrets):
-  AZURE_CLIENT_ID       app registration's Application (client) ID
-  AZURE_TENANT_ID       Directory (tenant) ID
-  AZURE_CLIENT_SECRET   client secret value
-  SHARE_URL             the OneDrive share link to the archive folder
-  SITE_TITLE            (optional) page title
+Access model:
+  * Permission: Graph APPLICATION permission `Sites.Selected` (read) -- grants
+    NOTHING until an admin grants this app read access to the one archive site.
+    So the app can read exactly that site and nothing else in the tenant.
+  * Auth: GitHub OIDC federated credential -- NO client secret is stored.
+    (If AZURE_CLIENT_SECRET is set, it's used instead, for local testing.)
 
-Auth: app-only (client credentials). The app needs the Microsoft Graph
-APPLICATION permission Files.Read.All with admin consent granted.
+Environment (set as GitHub Secrets):
+  AZURE_CLIENT_ID        app registration Application (client) ID
+  AZURE_TENANT_ID        Directory (tenant) ID
+  SHAREPOINT_SITE_URL    e.g. https://nuwildcat.sharepoint.com/sites/AMPArchive
+  ARCHIVE_FOLDER         (optional) subfolder within the site library, e.g. "AMP Historical"
+  SITE_TITLE             (optional) page title
+  AZURE_CLIENT_SECRET    (optional) only for local testing; unused in the cloud
 """
-import base64, json, os, re, sys
+import base64, json, os, re, sys, datetime
+from urllib.parse import urlparse
 try:
     import msal, requests
 except ImportError:
@@ -72,28 +77,45 @@ def extract(rel_parts, stem, ext):
             "section": section, "doc_type": doc_type(stem), "ext": ext.lower().lstrip(".")}
 
 
+def github_oidc_assertion():
+    """Fetch a GitHub Actions OIDC token to prove identity to Entra (no secret)."""
+    url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=api://AzureADTokenExchange"
+    tok = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+    r = requests.get(url, headers={"Authorization": "Bearer " + tok})
+    r.raise_for_status()
+    return r.json()["value"]
+
+
 def get_token():
     cid, tid = os.environ["AZURE_CLIENT_ID"], os.environ["AZURE_TENANT_ID"]
-    app = msal.ConfidentialClientApplication(
-        cid, authority=f"https://login.microsoftonline.com/{tid}",
-        client_credential=os.environ["AZURE_CLIENT_SECRET"])
+    authority = f"https://login.microsoftonline.com/{tid}"
+    secret = os.environ.get("AZURE_CLIENT_SECRET")
+    credential = secret if secret else {"client_assertion": github_oidc_assertion()}
+    app = msal.ConfidentialClientApplication(cid, authority=authority, client_credential=credential)
     res = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
     if "access_token" not in res:
         sys.exit("Auth failed: " + json.dumps(res.get("error_description", res)))
     return res["access_token"]
 
 
-def encode_share(url):
-    b = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    return "u!" + b
-
-
-def walk(session, share_url):
-    root = session.get(f"{GRAPH}/shares/{encode_share(share_url)}/driveItem").json()
+def resolve_root(session):
+    site_url = os.environ["SHAREPOINT_SITE_URL"].rstrip("/")
+    u = urlparse(site_url)
+    site = session.get(f"{GRAPH}/sites/{u.netloc}:{u.path}").json()
+    if "id" not in site:
+        sys.exit("Could not resolve SharePoint site: " + json.dumps(site))
+    drive = session.get(f"{GRAPH}/sites/{site['id']}/drive?$select=id").json()
+    drive_id = drive["id"]
+    folder = os.environ.get("ARCHIVE_FOLDER", "").strip("/")
+    root = session.get(f"{GRAPH}/drives/{drive_id}/root:/{folder}" if folder
+                       else f"{GRAPH}/drives/{drive_id}/root").json()
     if "id" not in root:
-        sys.exit("Could not resolve share link via Graph: " + json.dumps(root))
-    drive_id = root["parentReference"]["driveId"]
-    files, stack = [], [(root["id"], [])]
+        sys.exit("Could not resolve archive folder: " + json.dumps(root))
+    return drive_id, root["id"]
+
+
+def walk(session, drive_id, root_id):
+    files, stack = [], [(root_id, [])]
     while stack:
         item_id, rel = stack.pop()
         url = (f"{GRAPH}/drives/{drive_id}/items/{item_id}/children"
@@ -105,8 +127,7 @@ def walk(session, share_url):
                 if "folder" in c:
                     stack.append((c["id"], rel + [nm]))
                 elif "file" in c and not nm.lower().endswith("_error.txt"):
-                    ext = os.path.splitext(nm)[1].lower()
-                    if ext in PITCH_EXTS:
+                    if os.path.splitext(nm)[1].lower() in PITCH_EXTS:
                         files.append((rel + [nm], nm, c.get("webUrl", "")))
             url = data.get("@odata.nextLink")
     return files
@@ -170,10 +191,10 @@ function render(){head();const rows=filtered().sort((a,b)=>{let x=(a[sk]||"")+""
 
 
 def main():
-    import datetime
     session = requests.Session()
     session.headers["Authorization"] = "Bearer " + get_token()
-    files = walk(session, os.environ["SHARE_URL"])
+    drive_id, root_id = resolve_root(session)
+    files = walk(session, drive_id, root_id)
     recs = []
     for rel_parts, name, url in files:
         r = extract(rel_parts, os.path.splitext(name)[0], os.path.splitext(name)[1])
@@ -187,7 +208,7 @@ def main():
             .replace("__BUILT__", json.dumps(datetime.date.today().isoformat())))
     with open("docs/index.html", "w") as f:
         f.write(page)
-    print(f"Wrote docs/index.html from {len(recs)} files (via Graph).")
+    print(f"Wrote docs/index.html from {len(recs)} files (one SharePoint site, via Graph).")
 
 
 if __name__ == "__main__":

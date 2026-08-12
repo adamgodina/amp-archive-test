@@ -1,47 +1,56 @@
-# AMP Archive — cloud setup (nothing runs locally)
+# AMP Archive — cloud setup (least-privilege, nothing local)
 
-The website rebuilds **in GitHub's cloud** by reading the OneDrive archive through
-the Microsoft Graph API. Nobody installs anything; you click a button on GitHub
-once or twice a quarter and the site updates itself.
+The website rebuilds **in GitHub's cloud** by reading ONE SharePoint site through
+the Microsoft Graph API. No files are downloaded, nothing is installed on anyone's
+computer, and **no secret is stored** anywhere.
+
+Access is locked down two ways:
+- **Scope:** the app can read **exactly one SharePoint site** (`Sites.Selected`) — nothing else in the tenant.
+- **Auth:** GitHub proves its identity with a short-lived **OIDC token** — there is **no client secret** to expire or leak.
 
 ## One-time setup
 
-### 1. Register an app in Microsoft Entra (needs an admin — IT)
-1. Go to **entra.microsoft.com** → **App registrations** → **New registration**.
-2. Name: `AMP Archive Reader`. Accounts: *this organizational directory only*. Register.
-3. Copy the **Application (client) ID** and **Directory (tenant) ID**.
-4. **Certificates & secrets → New client secret** → copy the **Value** (shown once).
-5. **API permissions → Add → Microsoft Graph → Application permissions →** add
-   **`Files.Read.All`** → then **"Grant admin consent"** (this button needs an admin).
+### 1. Create the archive's home (you / a faculty owner)
+- Create a **SharePoint site** for the archive (e.g. `https://nuwildcat.sharepoint.com/sites/AMPArchive`).
+- Copy the pitch files into its document library. Note the site URL and, if the files
+  sit in a subfolder, that folder's name.
 
-> The admin-consent click is the only step that requires IT. Everything else you can do.
+### 2. Register the app (you) + two admin actions (IT)
+1. **entra.microsoft.com → App registrations → New registration.** Name `AMP Archive Reader`,
+   single tenant. Copy the **Application (client) ID** and **Directory (tenant) ID**.
+2. **API permissions → Microsoft Graph → Application permissions →** add **`Sites.Selected`**
+   → **IT grants admin consent.** *(This grants access to no sites yet — it's harmless by itself.)*
+3. **Certificates & secrets → Federated credentials → Add credential → "GitHub Actions deploying
+   Azure resources":**
+   - Organization: `adamgodina`  •  Repository: `amp-archive-test`  •  Entity: **Branch** `main`
+   - This lets this repo authenticate with **no secret**.
+4. **IT grants the app read access to just the one site** (Graph `POST /sites/{siteId}/permissions`
+   with role `read` for this app). This is the step that actually gives access — to one site only.
 
-### 2. Add the credentials as GitHub Secrets
-In this repo: **Settings → Secrets and variables → Actions → New repository secret.**
-Add four:
+### 3. Add repo settings (you)
+**Settings → Secrets and variables → Actions → New repository secret**, add:
 
-| Secret name | Value |
+| Secret | Value |
 |---|---|
 | `AZURE_CLIENT_ID` | Application (client) ID |
 | `AZURE_TENANT_ID` | Directory (tenant) ID |
-| `AZURE_CLIENT_SECRET` | the client secret **Value** |
-| `SHARE_URL` | the OneDrive share link to the archive folder |
+| `SHAREPOINT_SITE_URL` | e.g. `https://nuwildcat.sharepoint.com/sites/AMPArchive` |
+| `ARCHIVE_FOLDER` | subfolder in the library, or leave blank for the whole library |
 
-> Secrets are encrypted and never appear in the code or the site. Never paste them into files.
+> Note: there is **no `AZURE_CLIENT_SECRET`** — auth is secret-less via OIDC.
 
-### 3. Turn on GitHub Pages
-**Settings → Pages → Source: Deploy from a branch → Branch `main`, Folder `/docs` → Save.**
-Your site will be at `https://adamgodina.github.io/amp-archive-test/`.
+### 4. Turn on Pages (you)
+**Settings → Pages → Deploy from a branch → `main` / `/docs` → Save.**
+Site: `https://adamgodina.github.io/amp-archive-test/`
 
-## Running it (every quarter)
-1. Faculty add new files to the OneDrive archive folder (any time).
-2. Go to the **Actions** tab → **"Publish AMP Archive"** → **Run workflow**.
-3. ~1–2 minutes later the site reflects the current OneDrive contents. Done.
+## Running it (each quarter)
+1. Faculty add files to the SharePoint archive.
+2. **Actions tab → "Publish AMP Archive" → Run workflow.**
+3. ~1–2 min later the site matches the current archive. File links open each document in SharePoint.
 
-## Notes
-- Reads file **names, folders, and links only** — never file contents, nothing downloaded.
-- File links open each document directly in OneDrive (viewers still need access to the folder).
-- Whoever clicks "Run workflow" must be a collaborator on this repo. Faculty who only
-  add files never need GitHub access.
-- Local scripts (`_db_build/`, the `.command` launchers) are optional and kept off GitHub;
-  the cloud workflow is the source of truth.
+## What IT is actually being asked for
+- **Read-only** Graph `Sites.Selected` (consent) — no data access on its own.
+- **Read access to one named site.**
+- A **federated credential** trust for one GitHub repo — **no secret to manage.**
+
+That's it — no org-wide access, no stored credential.
